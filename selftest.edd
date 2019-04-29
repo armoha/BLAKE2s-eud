@@ -1,0 +1,5 @@
+[main]
+input: basemap.scx
+output: output.scx
+
+[selftest.py]
