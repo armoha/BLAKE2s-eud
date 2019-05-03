@@ -6,7 +6,7 @@ This is a pure eudplib implementation of BLAKE2s based on [RFC 7693].
 
 ## Limitations
 
-This library does not attempt to clear potentially sensitive data from its work memory (which includes the state context). Currently, only one state context can be used at the same time.
+This library does not attempt to clear potentially sensitive data from its work memory (which includes the state context).
 
 ## Non-RFC uses
 

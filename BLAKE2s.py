@@ -6,6 +6,24 @@ bw1 = EUDByteWriter()
 bw2 = EUDByteWriter()
 
 
+class blake2s_ctx(EUDStruct):
+    _fields_ = [
+        ('b', EUDArray),
+        ('h', EUDVArray(8)),
+        ('t', EUDVArray(2)),
+        'c',
+        'outlen',
+    ]
+
+    def constructor(self, b=None, h=None, t=None):
+        if b is None:
+            self.b = EUDArray(16)
+        if h is None:
+            self.h = EUDVArray(8)()
+        if t is None:
+            self.t = EUDVArray(2)()
+
+
 class VArrayReader:
     def __init__(self):
         self._trg = Forward()
@@ -88,13 +106,6 @@ def EUDFor(var, start, cond, incr):
 
 
 vr = VArrayReader()
-ctx_b = EUDArray(16)
-ctx_h = EUDVArray(8)()
-ctx_t = EUDVArray(2)()
-ctx_c = EUDVariable()
-ctx_outlen = EUDVariable()
-
-
 # Initialization Vector.
 # fmt: off
 blake2s_iv = [
@@ -118,13 +129,14 @@ sigma = EUDVArray(160)([
 
 # compression function. "last" flag indicates last block.
 @EUDFunc
-def BLAKE2s_compress(last):
+def BLAKE2s_compress(ctx, last):
+    ctx = blake2s_ctx.cast(ctx)
     i = EUDVariable()
     g = EUDCreateVariables(2)
     v, m = EUDVArray(16)(), EUDVArray(16)()
 
     for i in EUDFor(i, 0, 7, 1):
-        v[i] = ctx_h[i]
+        v[i] = ctx.h[i]
     DoActions([
         [
             SetMemory(v + 328 + 20 + 72 * (k+8), SetTo, blake2s_iv[k])
@@ -133,14 +145,14 @@ def BLAKE2s_compress(last):
         vr.seek(sigma, EPD(sigma), g[0])
     ])
 
-    v[12] = v[12] ^ ctx_t[0]
-    v[13] = v[13] ^ ctx_t[1]
+    v[12] = v[12] ^ ctx.t[0]
+    v[13] = v[13] ^ ctx.t[1]
     if EUDIf()(last):
         v[14] = f_bitnot(v[14])
     EUDEndIf()
 
     for i in EUDFor(i, 0, 15, 1):
-        m[i] = ctx_b[i]
+        m[i] = ctx.b[i]
 
     # Mixing function G.
     @EUDFunc
@@ -194,41 +206,70 @@ def BLAKE2s_compress(last):
     EUDEndLoopN()
 
     for i in EUDFor(i, 0, 7, 1):
-        ctx_h[i] = ctx_h[i] ^ (v[i] ^ v[i + 8])
+        ctx.h[i] = ctx.h[i] ^ (v[i] ^ v[i + 8])
 
 
 # Initialize the hashing context "ctx" with optional key "key".
 #      1 <= outlen <= 32 gives the digest size in bytes.
 #      Secret key (also <= 32 bytes) is optional (keylen = 0).
 @EUDFunc
-def BLAKE2s_init(outlen, key, keylen):  # (keylen=0: no key)
+def BLAKE2s_init(ctx, outlen, key, keylen):  # (keylen=0: no key)
+    origcp = f_getcurpl()
+    ctx = blake2s_ctx.cast(ctx)
     i = EUDVariable()
 
     if EUDIfNot()([outlen >= 1, outlen <= 32, keylen <= 32]):
         EUDReturn(-1)  # illegal parameters
     EUDEndIf()
 
-    DoActions([
-        [
-            SetMemory(ctx_h + 328 + 20 + 72 * k, SetTo, blake2s_iv[k])
-            for k in range(8)
-        ],
-        SetMemory(ctx_t + 328 + 20, SetTo, 0),
-        SetMemory(ctx_t + 328 + 20 + 72, SetTo, 0),
-        ctx_c.SetNumber(0),
-        [
-            SetMemory(ctx_b + 4 * k, SetTo, 0)
-            for k in range(16)
-        ]
+    ctx_h, ctx_t, ctx_b = EPD(ctx.h), EPD(ctx.t), EPD(ctx.b)
+    VProc(ctx_h, [
+        ctx_h.QueueAddTo(EPD(0x6509B0)),
+        SetMemory(0x6509B0, SetTo, 348 // 4),
     ])
-
-    ctx_h[0] = ctx_h[0] ^ 0x01010000 ^ f_bitlshift(keylen, 8) ^ outlen
-
-    ctx_outlen << outlen
+    VProc(ctx_t, [
+        ctx_t.QueueAddTo(EPD(0x6509B0)),
+        SetDeaths(CurrentPlayer, SetTo, blake2s_iv[0], 0),
+        SetDeaths(CurrentPlayer, SetTo, blake2s_iv[2], 3),
+        SetDeaths(CurrentPlayer, SetTo, blake2s_iv[4], 6),
+        SetDeaths(CurrentPlayer, SetTo, blake2s_iv[6], 9),
+        SetMemory(0x6509B0, Add, 18),
+        SetDeaths(CurrentPlayer, SetTo, blake2s_iv[1], 0),
+        SetDeaths(CurrentPlayer, SetTo, blake2s_iv[3], 3),
+        SetDeaths(CurrentPlayer, SetTo, blake2s_iv[5], 6),
+        SetDeaths(CurrentPlayer, SetTo, blake2s_iv[7], 9),
+        SetMemory(0x6509B0, SetTo, 348 // 4),
+    ])
+    VProc(ctx_b, [
+        ctx_b.QueueAssignTo(EPD(0x6509B0)),
+        SetDeaths(CurrentPlayer, SetTo, 0, 0),
+        SetMemory(0x6509B0, Add, 18),
+        SetDeaths(CurrentPlayer, SetTo, 0, 0),
+    ])
+    VProc(origcp, [
+        origcp.QueueAssignTo(EPD(0x6509B0)),
+        [
+            [
+                SetDeaths(CurrentPlayer, SetTo, 0, 0),
+                SetDeaths(CurrentPlayer, SetTo, 0, 1),
+                SetMemory(0x6509B0, Add, 1),
+            ] for k in range(4)
+        ],
+        [
+            [
+                SetDeaths(CurrentPlayer, SetTo, 0, 0),
+                SetMemory(0x6509B0, Add, 1),
+            ] for k in range(7)
+        ],
+        SetDeaths(CurrentPlayer, SetTo, 0, 0),
+    ])
+    ctx.h[0] = ctx.h[0] ^ 0x01010000 ^ f_bitlshift(keylen, 8) ^ outlen
+    ctx.c = 0
+    ctx.outlen = outlen
     i << keylen
     if EUDIf()(keylen >= 1):
-        BLAKE2s_update(key, keylen)
-        ctx_c << 64
+        BLAKE2s_update(ctx, key, keylen)
+        ctx.c = 64
     EUDEndIf()
 
     EUDReturn(0)
@@ -236,30 +277,33 @@ def BLAKE2s_init(outlen, key, keylen):  # (keylen=0: no key)
 
 # Add "inlen" bytes from "oin" into the hash.
 @EUDFunc
-def BLAKE2s_update(oin, inlen):
+def BLAKE2s_update(ctx, oin, inlen):
+    ctx = blake2s_ctx.cast(ctx)
     if EUDIf()(inlen == 0):
         EUDReturn()
     EUDEndIf()
-    global ctx_c
     i = EUDVariable()
 
     i << 0
+    ctx_b = ctx.b
     bw1.seekoffset(oin)
-    bw2.seekoffset(ctx_b + ctx_c)
+    bw2.seekoffset(ctx_b + ctx.c)
     if EUDWhile()(i < inlen):
+        ctx_c = ctx.c
         if EUDIf()(ctx_c == 64):
-            ctx_t[0] += ctx_c
-            if EUDIf()(ctx_t[0] < ctx_c):
-                ctx_t[1] += 1
+            ctx_t0 = ctx.t[0] + ctx_c
+            ctx.t[0] = ctx_t0
+            if EUDIf()(ctx_t0 < ctx_c):
+                ctx.t[1] += 1
             EUDEndIf()
-            BLAKE2s_compress(0)
-            ctx_c << 0
+            BLAKE2s_compress(ctx, 0)
+            ctx.c = 0
             bw2.flushdword()
             bw2.seekoffset(ctx_b)
         EUDEndIf()
         b = bw1.readbyte()
         bw2.writebyte(b)
-        ctx_c += 1
+        ctx.c += 1
         EUDSetContinuePoint()
         i += 1
     EUDEndWhile()
@@ -267,26 +311,32 @@ def BLAKE2s_update(oin, inlen):
     EUDReturn()
 
 
-def BLAKE2s_final(out):
-    global ctx_c
+@EUDFunc
+def BLAKE2s_final(ctx, out):
+    ctx = blake2s_ctx.cast(ctx)
     i = EUDVariable()
-    ctx_t[0] += ctx_c
-    if EUDIf()(ctx_t[0] < ctx_c):
-        ctx_t[1] += 1
+    ctx_c = ctx.c
+    ctx_t0 = ctx.t[0] + ctx_c
+    ctx.t[0] = ctx_t0
+    if EUDIf()(ctx_t0 < ctx_c):
+        ctx.t[1] += 1
     EUDEndIf()
 
-    bw1.seekoffset(ctx_b + ctx_c)
-    if EUDWhile()(ctx_c <= 63):
+    bw1.seekoffset(ctx.b + ctx_c)
+    if EUDWhile()(ctx.c <= 63):
         bw1.writebyte(0)
-        ctx_c += 1
+        ctx.c += 1
     EUDEndWhile()
     bw1.flushdword()
-    BLAKE2s_compress(1)
+    BLAKE2s_compress(ctx, 1)
 
     # little endian convert and store
     v = EUDVariable()
-    DoActions([i.SetNumber(0), vr.seek(ctx_h, EPD(ctx_h), v)])
+    i << 0
+    ctx_h = ctx.h
+    vr.seek(ctx_h, EPD(ctx_h), v)
     bw1.seekoffset(out)
+    ctx_outlen = ctx.outlen
     if EUDWhile()(i < ctx_outlen):
         vr.read()
         b0, b1, b2, b3 = f_dwbreak(v)[2:6]
@@ -312,10 +362,11 @@ def BLAKE2s_final(out):
 # Convenience function for all-in-one computation.
 @EUDFunc
 def BLAKE2s(out, outlen, key, keylen, oin, inlen):
-    if EUDIf()(BLAKE2s_init(outlen, key, keylen)):
+    ctx = blake2s_ctx()
+    if EUDIf()(BLAKE2s_init(ctx, outlen, key, keylen)):
         EUDReturn(-1)
     EUDEndIf()
-    BLAKE2s_update(oin, inlen)
-    BLAKE2s_final(out)
+    BLAKE2s_update(ctx, oin, inlen)
+    BLAKE2s_final(ctx, out)
 
     EUDReturn(0)
