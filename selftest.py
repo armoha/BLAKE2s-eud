@@ -85,7 +85,7 @@ def blake2s_selftest():
 
     # Compute and compare the hash of hashes.
     BLAKE2s.BLAKE2s_final(ctx, md)
-    
+
     if EUDIf()(Always()):  # TODO
         f_setcurpl(f_getuserplayerid())
         s.insert(0)

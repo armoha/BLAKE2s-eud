@@ -8,11 +8,11 @@ bw2 = EUDByteWriter()
 
 class blake2s_ctx(EUDStruct):
     _fields_ = [
-        ('b', EUDArray),
-        ('h', EUDVArray(8)),
-        ('t', EUDVArray(2)),
-        'c',
-        'outlen',
+        ("b", EUDArray),
+        ("h", EUDVArray(8)),
+        ("t", EUDVArray(2)),
+        "c",
+        "outlen",
     ]
 
     def constructor(self, b=None, h=None, t=None):
@@ -22,74 +22,6 @@ class blake2s_ctx(EUDStruct):
             self.h = EUDVArray(8)()
         if t is None:
             self.t = EUDVArray(2)()
-
-
-class VArrayReader:
-    def __init__(self):
-        self._trg = Forward()
-        self._fin = Forward()
-
-    def _maketrg(self):
-        PushTriggerScope()
-        self._trg << RawTrigger(
-            nextptr=0,
-            actions=[
-                SetMemory(0, SetTo, 0),
-                SetNextPtr(0, self._fin),
-            ]
-        )
-        self._fin << RawTrigger(
-            actions=[
-                SetMemory(self._trg + 4, Add, 72),
-                SetMemory(self._trg + 328 + 16, Add, 18),
-                SetMemory(self._trg + 360 + 16, Add, 18),
-            ]
-        )
-        PopTriggerScope()
-
-    def seek(self, varr_ptr, varr_epd, eudv, acts=[]):
-        if not self._trg.IsSet():
-            self._maketrg()
-
-        if IsEUDVariable(varr_ptr):
-            nptr = Forward()
-            RawTrigger(
-                nextptr=varr_ptr.GetVTable(),
-                actions=[
-                    varr_ptr.QueueAssignTo(EPD(self._trg) + 1),
-                    SetNextPtr(varr_ptr.GetVTable(), varr_epd.GetVTable()),
-                    varr_epd.AddNumber(1),
-                    varr_epd.QueueAssignTo(EPD(self._trg) + 360 // 4 + 4),
-                    SetNextPtr(varr_epd.GetVTable(), nptr),
-                    SetMemory(self._trg + 328 + 20, SetTo, EPD(eudv.getValueAddr())),
-                ]
-            )
-            nptr << NextTrigger()
-            VProc(varr_epd, [
-                varr_epd.AddNumber(328 // 4 + 3),
-                SetMemory(varr_epd._varact + 16, Add, -8),
-                [acts],
-            ])
-        else:
-            return [
-                SetNextPtr(self._trg, varr_ptr),
-                SetMemory(self._trg + 328 + 16, SetTo, varr_epd + 328 // 4 + 4),
-                SetMemory(self._trg + 328 + 20, SetTo, EPD(eudv.getValueAddr())),
-                SetMemory(self._trg + 360 + 16, SetTo, varr_epd + 1),
-            ]
-
-    def read(self, acts=[]):
-        if not self._trg.IsSet():
-            self._maketrg()
-        nptr = Forward()
-        RawTrigger(
-            nextptr=self._trg,
-            actions=[
-                SetNextPtr(self._fin, nptr),
-                [acts],
-            ]
-        )
-        nptr << NextTrigger()
 
 
 def EUDFor(var, start, cond, incr):
@@ -105,7 +37,7 @@ def EUDFor(var, start, cond, incr):
     EUDPopBlock("eudforblock")
 
 
-vr = VArrayReader()
+vr = EUDVArrayReader()
 # Initialization Vector.
 # fmt: off
 blake2s_iv = [
@@ -127,9 +59,9 @@ sigma = EUDVArray(160)([
 # fmt: on
 
 
-# compression function. "last" flag indicates last block.
 @EUDFunc
 def BLAKE2s_compress(ctx, last):
+    """Compression function. "last" flag indicates last block."""
     ctx = blake2s_ctx.cast(ctx)
     i = EUDVariable()
     g = EUDCreateVariables(2)
@@ -137,13 +69,10 @@ def BLAKE2s_compress(ctx, last):
 
     for i in EUDFor(i, 0, 7, 1):
         v[i] = ctx.h[i]
-    DoActions([
-        [
-            SetMemory(v + 328 + 20 + 72 * (k+8), SetTo, blake2s_iv[k])
-            for k in range(8)
-        ],
-        vr.seek(sigma, EPD(sigma), g[0])
-    ])
+    DoActions(
+        [SetMemory(v + 328 + 20 + 72 * (k + 8), SetTo, blake2s_iv[k]) for k in range(8)]
+        + [vr.seek(sigma, EPD(sigma), g[0])]
+    )
 
     v[12] = v[12] ^ ctx.t[0]
     v[13] = v[13] ^ ctx.t[1]
@@ -179,29 +108,37 @@ def BLAKE2s_compress(ctx, last):
         v[b] = z
 
     if EUDLoopN()(10):
-        vr.read(SetMemory(vr._trg + 328 + 20, SetTo, EPD(g[0].getValueAddr())))
-        vr.read(SetMemory(vr._trg + 328 + 20, SetTo, EPD(g[1].getValueAddr())))
+        PushTriggerScope()
+        update_g0 = vr.read(
+            SetMemory(vr._trg + 328 + 20, SetTo, EPD(g[0].getValueAddr()))
+        )
+        update_g1 = vr.read(
+            SetMemory(vr._trg + 328 + 20, SetTo, EPD(g[1].getValueAddr()))
+        )
+        PopTriggerScope()
+
+        def update_g():
+            nptr = Forward()
+            RawTrigger(
+                nextptr=update_g0, actions=SetMemory(update_g1 + 380, SetTo, nptr)
+            )
+            nptr << NextTrigger()
+
+        update_g()
         B2S_G(0, 4, 8, 12, m[g[0]], m[g[1]])
-        vr.read(SetMemory(vr._trg + 328 + 20, SetTo, EPD(g[0].getValueAddr())))
-        vr.read(SetMemory(vr._trg + 328 + 20, SetTo, EPD(g[1].getValueAddr())))
+        update_g()
         B2S_G(1, 5, 9, 13, m[g[0]], m[g[1]])
-        vr.read(SetMemory(vr._trg + 328 + 20, SetTo, EPD(g[0].getValueAddr())))
-        vr.read(SetMemory(vr._trg + 328 + 20, SetTo, EPD(g[1].getValueAddr())))
+        update_g()
         B2S_G(2, 6, 10, 14, m[g[0]], m[g[1]])
-        vr.read(SetMemory(vr._trg + 328 + 20, SetTo, EPD(g[0].getValueAddr())))
-        vr.read(SetMemory(vr._trg + 328 + 20, SetTo, EPD(g[1].getValueAddr())))
+        update_g()
         B2S_G(3, 7, 11, 15, m[g[0]], m[g[1]])
-        vr.read(SetMemory(vr._trg + 328 + 20, SetTo, EPD(g[0].getValueAddr())))
-        vr.read(SetMemory(vr._trg + 328 + 20, SetTo, EPD(g[1].getValueAddr())))
+        update_g()
         B2S_G(0, 5, 10, 15, m[g[0]], m[g[1]])
-        vr.read(SetMemory(vr._trg + 328 + 20, SetTo, EPD(g[0].getValueAddr())))
-        vr.read(SetMemory(vr._trg + 328 + 20, SetTo, EPD(g[1].getValueAddr())))
+        update_g()
         B2S_G(1, 6, 11, 12, m[g[0]], m[g[1]])
-        vr.read(SetMemory(vr._trg + 328 + 20, SetTo, EPD(g[0].getValueAddr())))
-        vr.read(SetMemory(vr._trg + 328 + 20, SetTo, EPD(g[1].getValueAddr())))
+        update_g()
         B2S_G(2, 7, 8, 13, m[g[0]], m[g[1]])
-        vr.read(SetMemory(vr._trg + 328 + 20, SetTo, EPD(g[0].getValueAddr())))
-        vr.read(SetMemory(vr._trg + 328 + 20, SetTo, EPD(g[1].getValueAddr())))
+        update_g()
         B2S_G(3, 4, 9, 14, m[g[0]], m[g[1]])
     EUDEndLoopN()
 
@@ -209,11 +146,14 @@ def BLAKE2s_compress(ctx, last):
         ctx.h[i] = ctx.h[i] ^ (v[i] ^ v[i + 8])
 
 
-# Initialize the hashing context "ctx" with optional key "key".
-#      1 <= outlen <= 32 gives the digest size in bytes.
-#      Secret key (also <= 32 bytes) is optional (keylen = 0).
 @EUDFunc
-def BLAKE2s_init(ctx, outlen, key, keylen):  # (keylen=0: no key)
+def BLAKE2s_init(ctx, outlen, key, keylen):
+    """
+    Initialize the hashing context "ctx" with optional key "key".
+
+    1 <= outlen <= 32 gives the digest size in bytes.
+    Secret key (also <= 32 bytes) is optional (keylen=0: no key).
+    """
     origcp = f_getcurpl()
     ctx = blake2s_ctx.cast(ctx)
     i = EUDVariable()
@@ -223,46 +163,51 @@ def BLAKE2s_init(ctx, outlen, key, keylen):  # (keylen=0: no key)
     EUDEndIf()
 
     ctx_h, ctx_t, ctx_b = EPD(ctx.h), EPD(ctx.t), EPD(ctx.b)
-    VProc(ctx_h, [
-        ctx_h.QueueAddTo(EPD(0x6509B0)),
-        SetMemory(0x6509B0, SetTo, 348 // 4),
-    ])
-    VProc(ctx_t, [
-        ctx_t.QueueAddTo(EPD(0x6509B0)),
-        SetDeaths(CurrentPlayer, SetTo, blake2s_iv[0], 0),
-        SetDeaths(CurrentPlayer, SetTo, blake2s_iv[2], 3),
-        SetDeaths(CurrentPlayer, SetTo, blake2s_iv[4], 6),
-        SetDeaths(CurrentPlayer, SetTo, blake2s_iv[6], 9),
-        SetMemory(0x6509B0, Add, 18),
-        SetDeaths(CurrentPlayer, SetTo, blake2s_iv[1], 0),
-        SetDeaths(CurrentPlayer, SetTo, blake2s_iv[3], 3),
-        SetDeaths(CurrentPlayer, SetTo, blake2s_iv[5], 6),
-        SetDeaths(CurrentPlayer, SetTo, blake2s_iv[7], 9),
-        SetMemory(0x6509B0, SetTo, 348 // 4),
-    ])
-    VProc(ctx_b, [
-        ctx_b.QueueAssignTo(EPD(0x6509B0)),
-        SetDeaths(CurrentPlayer, SetTo, 0, 0),
-        SetMemory(0x6509B0, Add, 18),
-        SetDeaths(CurrentPlayer, SetTo, 0, 0),
-    ])
-    VProc(origcp, [
-        origcp.QueueAssignTo(EPD(0x6509B0)),
+    VProc(
+        ctx_h, [ctx_h.QueueAddTo(EPD(0x6509B0)), SetMemory(0x6509B0, SetTo, 348 // 4)]
+    )
+    VProc(
+        ctx_t,
         [
+            ctx_t.QueueAddTo(EPD(0x6509B0)),
+            SetDeaths(CurrentPlayer, SetTo, blake2s_iv[0], 0),
+            SetDeaths(CurrentPlayer, SetTo, blake2s_iv[2], 3),
+            SetDeaths(CurrentPlayer, SetTo, blake2s_iv[4], 6),
+            SetDeaths(CurrentPlayer, SetTo, blake2s_iv[6], 9),
+            SetMemory(0x6509B0, Add, 18),
+            SetDeaths(CurrentPlayer, SetTo, blake2s_iv[1], 0),
+            SetDeaths(CurrentPlayer, SetTo, blake2s_iv[3], 3),
+            SetDeaths(CurrentPlayer, SetTo, blake2s_iv[5], 6),
+            SetDeaths(CurrentPlayer, SetTo, blake2s_iv[7], 9),
+            SetMemory(0x6509B0, SetTo, 348 // 4),
+        ],
+    )
+    VProc(
+        ctx_b,
+        [
+            ctx_b.QueueAssignTo(EPD(0x6509B0)),
+            SetDeaths(CurrentPlayer, SetTo, 0, 0),
+            SetMemory(0x6509B0, Add, 18),
+            SetDeaths(CurrentPlayer, SetTo, 0, 0),
+        ],
+    )
+    VProc(
+        origcp,
+        [origcp.QueueAssignTo(EPD(0x6509B0))]
+        + [
             [
                 SetDeaths(CurrentPlayer, SetTo, 0, 0),
                 SetDeaths(CurrentPlayer, SetTo, 0, 1),
                 SetMemory(0x6509B0, Add, 1),
-            ] for k in range(4)
-        ],
-        [
-            [
-                SetDeaths(CurrentPlayer, SetTo, 0, 0),
-                SetMemory(0x6509B0, Add, 1),
-            ] for k in range(7)
-        ],
-        SetDeaths(CurrentPlayer, SetTo, 0, 0),
-    ])
+            ]
+            for k in range(4)
+        ]
+        + [
+            [SetDeaths(CurrentPlayer, SetTo, 0, 0), SetMemory(0x6509B0, Add, 1)]
+            for k in range(7)
+        ]
+        + [SetDeaths(CurrentPlayer, SetTo, 0, 0)],
+    )
     ctx.h[0] = ctx.h[0] ^ 0x01010000 ^ f_bitlshift(keylen, 8) ^ outlen
     ctx.c = 0
     ctx.outlen = outlen
@@ -275,9 +220,9 @@ def BLAKE2s_init(ctx, outlen, key, keylen):  # (keylen=0: no key)
     EUDReturn(0)
 
 
-# Add "inlen" bytes from "oin" into the hash.
 @EUDFunc
 def BLAKE2s_update(ctx, oin, inlen):
+    """Add "inlen" bytes from "oin" into the hash."""
     ctx = blake2s_ctx.cast(ctx)
     if EUDIf()(inlen == 0):
         EUDReturn()
@@ -308,7 +253,6 @@ def BLAKE2s_update(ctx, oin, inlen):
         i += 1
     EUDEndWhile()
     bw2.flushdword()
-    EUDReturn()
 
 
 @EUDFunc
@@ -340,28 +284,28 @@ def BLAKE2s_final(ctx, out):
     if EUDWhile()(i < ctx_outlen):
         vr.read()
         b0, b1, b2, b3 = f_dwbreak(v)[2:6]
-    
+
         bw1.writebyte(b0)
         i += 1
         EUDBreakIf(i >= ctx_outlen)
-    
+
         bw1.writebyte(b1)
         i += 1
         EUDBreakIf(i >= ctx_outlen)
-    
+
         bw1.writebyte(b2)
         i += 1
         EUDBreakIf(i >= ctx_outlen)
-    
+
         bw1.writebyte(b3)
         i += 1
     EUDEndWhile()
     bw1.flushdword()
 
 
-# Convenience function for all-in-one computation.
 @EUDFunc
 def BLAKE2s(out, outlen, key, keylen, oin, inlen):
+    """Compute hash by all-in-one function for convenience."""
     ctx = blake2s_ctx()
     if EUDIf()(BLAKE2s_init(ctx, outlen, key, keylen)):
         EUDReturn(-1)
